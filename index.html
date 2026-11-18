@@ -876,7 +876,16 @@ body { overflow-x:hidden; }
     <div id="mestre-ranking" class="mestre-tab-content" style="display:none;">
       <div class="grid">
         <div class="card">
-          <h3 class="title" style="font-size:1.1rem;">Ranking Acumulado (até 300 pontos)</h3>
+          <h3 class="title" style="font-size:1.1rem;">Ranking Acumulado (até <span id="ranking-limite-pontos">600</span> pontos)</h3>
+          <div class="form-group" style="margin-top:12px">
+            <label for="quantidade-rodadas">Quantidade de rodadas da competição</label>
+            <select id="quantidade-rodadas" onchange="alterarQuantidadeRodadas(this.value)">
+              <option value="1">1 rodada</option><option value="2">2 rodadas</option>
+              <option value="3">3 rodadas</option><option value="4">4 rodadas</option>
+              <option value="5">5 rodadas</option><option value="6">6 rodadas</option>
+            </select>
+            <p class="subtitle" style="margin-top:6px">Padrão: 6 rodadas. A configuração fica salva e sincronizada com a competição. Altere antes de iniciar uma rodada.</p>
+          </div>
           <table>
             <thead>
               <tr><th>Pos.</th><th>Equipe</th><th>Pontos da rodada</th><th>Total acumulado</th></tr>
@@ -1339,6 +1348,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     orcamentosGrupos: {},
     reservaRHUtilizada: {},
     historicoRodadas: [],
+    quantidadeRodadas: 6,
     rodadaSalva: false,
     cartasSorteadasPorGrupo: {},
     tempoEsgotadoGlobal: false,
@@ -1579,10 +1589,59 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     clearTimeout(avisoTemporarioTimer);
     avisoTemporarioTimer=setTimeout(function(){el.classList.remove('visivel');},3300);
   }
+  function limiteRodadas(estado) {
+    var valor = Number((estado || appState).quantidadeRodadas);
+    return Number.isInteger(valor) && valor >= 1 && valor <= 6 ? valor : 6;
+  }
+
+  async function alterarQuantidadeRodadas(valor) {
+    var seletor = document.getElementById('quantidade-rodadas');
+    var novo = Number(valor);
+    var anterior = limiteRodadas();
+    if (cyberRole !== 'mestre' || !sincronizacaoPronta) {
+      if (seletor) seletor.value = String(anterior);
+      cyberAlert('Somente o Mestre conectado pode alterar a quantidade de rodadas.');
+      return;
+    }
+    if (!Number.isInteger(novo) || novo < 1 || novo > 6) {
+      if (seletor) seletor.value = String(anterior);
+      return;
+    }
+    var concluidas = (appState.historicoRodadas || []).length;
+    var ativa = !appState.rodadaSalva && Object.keys(appState.crises || {}).length > 0;
+    if (appState.competicaoEncerrada || ativa || novo < concluidas) {
+      if (seletor) seletor.value = String(anterior);
+      cyberAlert('Encerre a rodada ativa antes de alterar o limite. Não é possível definir menos rodadas que as já concluídas.');
+      return;
+    }
+    if (novo === anterior) return;
+    if (!await cyberConfirm('Definir a competição para ' + novo + (novo === 1 ? ' rodada' : ' rodadas') + '?')) {
+      if (seletor) seletor.value = String(anterior);
+      return;
+    }
+    try {
+      var ref = window.rtdbRef(window.db, CYBER_BASE + '/publico');
+      var resultado = await window.rtdbRunTransaction(ref, function(st) {
+        if (!st || st.competicaoEncerrada) return;
+        var hist = st.historicoRodadas || [];
+        if (hist.length > novo || (!st.rodadaSalva && Object.keys(st.crises || {}).length)) return;
+        st.quantidadeRodadas = novo;
+        return st;
+      }, {applyLocally:false});
+      if (!resultado.committed) throw new Error('Configuração não confirmada');
+      appState.quantidadeRodadas = novo;
+      renderRanking();
+      avisoTemporario('Competição configurada para ' + novo + (novo === 1 ? ' rodada.' : ' rodadas.'));
+    } catch (e) {
+      if (seletor) seletor.value = String(anterior);
+      cyberAlert('Não foi possível salvar a quantidade de rodadas. Tente novamente.');
+    }
+  }
+
   async function reiniciarRodada() {
     if(appState.competicaoEncerrada){cyberAlert("A competição foi encerrada. Reinicie a competição para jogar novamente.");return;}
     var concluidas = (appState.historicoRodadas || []).length;
-    if (concluidas >= 3) { cyberAlert('As três rodadas já foram concluídas. Consulte o ranking final.'); return; }
+    if (concluidas >= limiteRodadas()) { cyberAlert('As '+limiteRodadas()+' rodadas já foram concluídas. Consulte o ranking final.'); return; }
     if (!appState.rodadaSalva && Object.keys(appState.crises || {}).length) {
       cyberAlert('Antes de avançar, registre a pontuação da rodada atual em “Salvar Rodada”.'); return;
     }
@@ -1706,7 +1765,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
   }
 
   function sortearCartas() {
-    if ((appState.historicoRodadas || []).length >= 3) { cyberAlert('Limite de três rodadas atingido.'); return; }
+    if ((appState.historicoRodadas || []).length >= limiteRodadas()) { cyberAlert('Limite de '+limiteRodadas()+' rodadas atingido.'); return; }
     if (appState.rodadaSalva) { cyberAlert('Clique em “Nova Rodada” antes de sortear novamente.'); return; }
     if (Object.keys(appState.crises || {}).length) { cyberAlert('Já existem cartas sorteadas nesta rodada.'); return; }
     if (!appState.cartasSorteadasPorGrupo) appState.cartasSorteadasPorGrupo = {};
@@ -1781,7 +1840,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     return b.total-a.total || b.saldo-a.saldo || b.vitorias-a.vitorias || b.participacoes-a.participacoes;
   }
   function rankingFinalConcluido() {
-    if ((appState.historicoRodadas || []).length !== 3 && !appState.competicaoEncerrada) return [];
+    if ((appState.historicoRodadas || []).length !== limiteRodadas() && !appState.competicaoEncerrada) return [];
     var hist = appState.historicoRodadas || [];
     var lista = (appState.grupos || []).map(function(g) {
       var salvo = hist.reduce(function(s,h){return s + Number(((h.placar || {})[g] || {}).total || 0);},0);
@@ -1890,7 +1949,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     if(cyberRole!=='mestre'||!sincronizacaoPronta){cyberAlert('Apenas o Mestre conectado pode encerrar a rodada.');return;}
     if(appState.competicaoEncerrada){cyberAlert('A competição já foi encerrada.');return;}
     if(appState.rodadaSalva){cyberAlert('Esta rodada já foi salva.');return;}
-    if((appState.historicoRodadas||[]).length>=3){cyberAlert('Limite de três rodadas atingido.');return;}
+    if((appState.historicoRodadas||[]).length>=limiteRodadas()){cyberAlert('Limite de '+limiteRodadas()+' rodadas atingido.');return;}
     var rodadaId=String(appState.identificadorSorteioAtual||'');
     if(!rodadaId){cyberAlert('Nenhuma rodada ativa para encerrar.');return;}
     var grupos=(appState.grupos||[]).slice();
@@ -1913,7 +1972,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
       grupos.forEach(function(g,i){var d=cyberPrivateState[String(i+1)];dadosPrivados[g]=d&&String(d._rodadaId||'')===rodadaId&&d.decisoes?JSON.parse(JSON.stringify(d.decisoes)):null;});
       var r=await window.rtdbRunTransaction(window.rtdbRef(window.db,CYBER_BASE+'/publico'),function(st){
         if(!st||st.rodadaSalva||st.competicaoEncerrada||String(st.identificadorSorteioAtual||'')!==rodadaId)return;
-        var hist=st.historicoRodadas||[];if(hist.length>=3)return;
+        var hist=st.historicoRodadas||[];if(hist.length>=limiteRodadas(st))return;
         var semResposta=grupos.filter(function(g){return ausentes.includes(g);});
         if(semResposta.length){var t=st.cronometroCompeticao||{};if(t.status!=='encerrado'||t.encerramentoMotivo!=='tempo_esgotado'||String(t.sorteioId||'')!==rodadaId)return;}
         for(var j=0;j<grupos.length;j++){
@@ -1939,8 +1998,8 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
       },{applyLocally:false});
       if(!r.committed){cyberAlert('Não foi possível encerrar: os dados da rodada mudaram ou ainda há avaliações pendentes. Atualize a página e confira o placar.');return;}
       var num=(r.snapshot.val().historicoRodadas||[]).length;
-      avisoTemporario('Rodada '+num+' de 3 encerrada! '+(ausentes.length?ausentes.length+' equipe(s) sem resposta receberam nota 0 e penalidade de -10 pontos no ranking, sem alteração de orçamento. ':'')+(num===3?'Partida concluída!':'Clique em Nova Rodada para continuar.'));
-      if(num===3)setTimeout(mostrarPodioFinal,650);
+      avisoTemporario('Rodada '+num+' de '+limiteRodadas()+' encerrada! '+(ausentes.length?ausentes.length+' equipe(s) sem resposta receberam nota 0 e penalidade de -10 pontos no ranking, sem alteração de orçamento. ':'')+(num===limiteRodadas()?'Partida concluída!':'Clique em Nova Rodada para continuar.'));
+      if(num===limiteRodadas())setTimeout(mostrarPodioFinal,650);
     }catch(e){console.error('Falha ao encerrar rodada:',e);cyberAlert('Falha ao encerrar rodada: '+String(e?.message||e).slice(0,250));}
   }
 
@@ -1982,7 +2041,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
   function renderAvaliacaoFinalCyber(){
     var el=document.getElementById('cyber-avaliacao-final');if(!el)return;
     if(cyberRole!=='mestre'){el.textContent='';return;}
-    if((appState.historicoRodadas||[]).length<3&&!appState.competicaoEncerrada){el.innerHTML='<p class="subtitle">Aguardando o encerramento da competição.</p>';return;}
+    if((appState.historicoRodadas||[]).length<limiteRodadas()&&!appState.competicaoEncerrada){el.innerHTML='<p class="subtitle">Aguardando o encerramento da competição.</p>';return;}
     var hist=appState.historicoRodadas||[];
     el.innerHTML=hist.map(h=>'<details style="margin:10px 0;padding:12px;border:1px solid #364568;border-radius:9px"><summary>Rodada '+Number(h.rodada)+' — analisar decisões</summary>'+
       (appState.grupos||[]).map(g=>{var d=(h.decisoesRodada||{})[g]||{},c=CARTAS_CRISE.find(x=>x.titulo===(h.cartasRodada||{})[g]);return '<div style="padding:12px;border-bottom:1px solid #34415c"><strong>'+escaparHTML(g)+'</strong><p>'+escaparHTML((h.cartasRodada||{})[g]||'')+'</p><p>Decisão 1: '+escaparHTML(d.q1Texto||'Não arquivada')+'</p><p>Decisão 2: '+escaparHTML(d.q2Texto||'Não arquivada')+'</p><p>Justificativa: '+escaparHTML(d.pitchText||'Não arquivada')+'</p><details><summary style="color:#f8c66e">Revelar soluções de referência</summary>'+(c?'<p>1: '+escaparHTML((c.opts1||[]).find(x=>x.ideal)?.texto||'')+'</p><p>2: '+escaparHTML((c.opts2||[]).find(x=>x.ideal)?.texto||'')+'</p>':'<p>Carta não identificada</p>')+'</details></div>';}).join('')+'</details>').join('');
@@ -3081,6 +3140,11 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     var tbody = document.getElementById('tbody-ranking');
     if (!tbody) return;
     var hist = appState.historicoRodadas || [];
+    var seletorRodadas = document.getElementById('quantidade-rodadas');
+    if (seletorRodadas && document.activeElement !== seletorRodadas) seletorRodadas.value = String(limiteRodadas());
+    if (seletorRodadas) seletorRodadas.disabled = cyberRole !== 'mestre' || !!appState.competicaoEncerrada || (!appState.rodadaSalva && Object.keys(appState.crises || {}).length > 0);
+    var tituloLimite = document.getElementById('ranking-limite-pontos');
+    if (tituloLimite) tituloLimite.textContent = String(limiteRodadas()*100);
     var lista = appState.grupos.map(function(g) {
       var p = (appState.pontuacoes && appState.pontuacoes[g]) || { fund: 0, viab: 0, pitch: 0, saldo: 0, total: 0 };
       var acumulado = hist.reduce(function(soma,h) { return soma + Number((h.placar[g] || {}).total || 0); },0);
@@ -3090,9 +3154,9 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     lista.forEach(function(x){Object.assign(x,criterioDesempate(x.grupo));});
     lista.sort(compararClassificacao);
     var botaoPodio=document.getElementById('btn-rever-podio');
-    if(botaoPodio)botaoPodio.style.display=(hist.length===3||appState.competicaoEncerrada)?'block':'none';
+    if(botaoPodio)botaoPodio.style.display=(hist.length===limiteRodadas()||appState.competicaoEncerrada)?'block':'none';
     tbody.innerHTML = lista.map(function(item, idx) {
-      return '<tr><td>' + (idx+1) + 'º</td><td>' + escaparHTML(item.grupo) + '</td><td>' + item.rodada + ' pts</td><td><strong style="color:var(--cyan);">' + item.total + ' / 300 pts</strong><div style="font-size:.7rem;color:var(--text-muted)">Saldo: '+item.saldo+' • Vitórias: '+item.vitorias+' • Participações: '+item.participacoes+'</div></td></tr>';
+      return '<tr><td>' + (idx+1) + 'º</td><td>' + escaparHTML(item.grupo) + '</td><td>' + item.rodada + ' pts</td><td><strong style="color:var(--cyan);">' + item.total + ' / '+(limiteRodadas()*100)+' pts</strong><div style="font-size:.7rem;color:var(--text-muted)">Saldo: '+item.saldo+' • Vitórias: '+item.vitorias+' • Participações: '+item.participacoes+'</div></td></tr>';
     }).join('');
   }
 
