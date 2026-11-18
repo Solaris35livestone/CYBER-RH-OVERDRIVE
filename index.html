@@ -1945,6 +1945,20 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     mostrarPodioFinal();
   }
 
+  // Um encerramento manual ou o término natural em 00:00 autorizam
+  // fechar a rodada com equipes ausentes. Não exige esperar novamente.
+  function deliberacaoTerminouParaSalvar(timer, rodadaId) {
+    if (!timer || String(timer.sorteioId || '') !== String(rodadaId)) return false;
+    if (timer.status === 'encerrado') {
+      return timer.encerramentoMotivo === 'tempo_esgotado' ||
+             timer.encerramentoMotivo === 'encerramento_manual' ||
+             Number(timer.restante) === 0;
+    }
+    return timer.status === 'rodando' &&
+           Number(timer.terminaEm) > 0 &&
+           Number(timer.terminaEm) <= Date.now();
+  }
+
   async function salvarRodadaNoHistorico() {
     if(cyberRole!=='mestre'||!sincronizacaoPronta){cyberAlert('Apenas o Mestre conectado pode encerrar a rodada.');return;}
     if(appState.competicaoEncerrada){cyberAlert('A competição já foi encerrada.');return;}
@@ -1963,9 +1977,9 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     if(naoPublicadas.length){cyberAlert('Publique primeiro as avaliações das equipes que responderam: '+naoPublicadas.join(', '));return;}
     if(ausentes.length){
       var t=appState.cronometroCompeticao||{};
-      var esgotado=t.status==='encerrado'&&t.encerramentoMotivo==='tempo_esgotado'&&String(t.sorteioId||'')===rodadaId;
-      if(!esgotado){cyberAlert('Para encerrar com equipes sem resposta, aguarde o tempo acabar.');return;}
-      if(!await cyberConfirm('Tempo esgotado. Encerrar a rodada com nota acadêmica 0, penalidade de -10 pontos na classificação e orçamento inalterado para: '+ausentes.join(', ')+'? Esta ação bloqueará novos envios.'))return;
+      var esgotado=deliberacaoTerminouParaSalvar(t,rodadaId);
+      if(!esgotado){cyberAlert('Para salvar com equipes sem resposta, encerre a deliberação no botão Encerrar tempo ou aguarde o cronômetro chegar a 00:00.');return;}
+      if(!await cyberConfirm('Deliberação encerrada. Encerrar a rodada com nota acadêmica 0, penalidade de -10 pontos na classificação e orçamento inalterado para: '+ausentes.join(', ')+'? Esta ação bloqueará novos envios.'))return;
     }else if(!await cyberConfirm('Salvar e encerrar a rodada atual?'))return;
     try{
       var dadosPrivados={};
@@ -1974,7 +1988,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
         if(!st||st.rodadaSalva||st.competicaoEncerrada||String(st.identificadorSorteioAtual||'')!==rodadaId)return;
         var hist=st.historicoRodadas||[];if(hist.length>=limiteRodadas(st))return;
         var semResposta=grupos.filter(function(g){return ausentes.includes(g);});
-        if(semResposta.length){var t=st.cronometroCompeticao||{};if(t.status!=='encerrado'||t.encerramentoMotivo!=='tempo_esgotado'||String(t.sorteioId||'')!==rodadaId)return;}
+        if(semResposta.length){var t=st.cronometroCompeticao||{};if(!deliberacaoTerminouParaSalvar(t,rodadaId))return;}
         for(var j=0;j<grupos.length;j++){
           var g=grupos[j];
           if(!semResposta.includes(g)&&!(st.pontuacoes||{})[g]?.publicacaoId)return;
