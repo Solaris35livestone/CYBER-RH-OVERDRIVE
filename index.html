@@ -2838,6 +2838,45 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
   // Gemini: parecer consultivo; a publicação continua exclusivamente manual.
   var CYBER_GEMINI_WORKER='https://cyber-rh-overdriver.solaris35livestone-d6f.workers.dev/';
   var gp5ParecerIA={};
+  // Recebe seis notas independentes, atribuídas à qualidade de cada critério.
+  // Não inventa nem distribui notas proporcionalmente quando o serviço não as fornece.
+  function extrairNotasPorCriterioGP5(parecer){
+    var origem=parecer.criterios||parecer.notasPorCriterio||parecer.notas;
+    if(!origem||typeof origem!=='object')throw Error('O parecer não trouxe as seis notas individuais. Atualize o serviço de avaliação.');
+    var notas={},soma=0;
+    CRITERIOS_GP5.forEach(function(c,idx){
+      var item=Array.isArray(origem)?origem.find(function(x){return x&&x.id===c.id;}):origem[c.id];
+      if(item===undefined&&Array.isArray(origem))item=origem[idx];
+      var valor=(item&&typeof item==='object')?item.nota:item;
+      if(!Number.isInteger(valor)||valor<0||valor>c.max)throw Error('Nota individual inválida: '+c.rotulo);
+      notas[c.id]={nota:valor,origem:'ia',justificativa:String(item&&typeof item==='object'?(item.justificativa||''):'').slice(0,800),atualizadoEm:new Date().toISOString()};
+      soma+=valor;
+    });
+    if(!Number.isInteger(parecer.nota)||parecer.nota!==soma)throw Error('A soma dos seis critérios não corresponde à nota total.');
+    return notas;
+  }
+  // A sugestão operacional é editável pela banca antes da validação final.
+  function verificacoesSugeridasGeminiGP5(resultado){
+    var status=resultado==='vitoria'?'sim':resultado==='parcial'?'parcial':'nao';
+    var v={};VERIFICACOES_GP5.forEach(function(_,j){v[j]=status;});return v;
+  }
+  async function registrarParecerGeminiGP5(i,parecer){
+    var g=(appState.grupos||[])[i],rodada=String(appState.identificadorSorteioAtual||'');
+    var notas=extrairNotasPorCriterioGP5(parecer);
+    var v=verificacoesSugeridasGeminiGP5(parecer.resultado);
+    var path=CYBER_BASE+'/publico/avaliacoesHibridas/'+g;
+    var r=await window.rtdbRunTransaction(window.rtdbRef(window.db,path),function(old){
+      old=old||{};
+      if((old.rodadaId&&old.rodadaId!==rodada)||old.publicado)return;
+      old.rodadaId=rodada;old.notas=notas;
+      old.verificacoes=v;old.impedimentoCritico=false;
+      old.origemNotas='ia';
+      old.parecerIA={nota:parecer.nota,criterios:parecer.criterios||parecer.notasPorCriterio||parecer.notas,resultado:parecer.resultado,justificativa:String(parecer.justificativa||''),alertas:String(parecer.alertas||''),recebidoEm:parecer.recebidoEm};
+      return old;
+    },{applyLocally:false});
+    if(!r.committed)throw Error('Rodada encerrada ou avaliação já publicada');
+    return notas;
+  }
   async function solicitarParecerIAGP5(i){
     if(cyberRole!=='mestre'||!sincronizacaoPronta){cyberAlert('Entre como Mestre e aguarde a sincronização.');return;}
     var g=(appState.grupos||[])[i], d=decisaoPrivadaGP5(g), c=gp5Carta(g);
@@ -2853,12 +2892,15 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
         carta:{titulo:c.titulo,cenario:[c.desc,c.ameaca,c.setor,c.q1,c.q2].filter(Boolean).join(' | '),opcoes:[...(c.opts1||[]),...(c.opts2||[])].map(o=>o.texto)}};
       var r=await fetch(CYBER_GEMINI_WORKER,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(payload)});
       var json=await r.json().catch(()=>({}));
-      if(!r.ok)throw Error((json.erro||'Falha na avaliação')+(json.codigo?' (Gemini '+json.codigo+')':''));
-      if(!Number.isInteger(json.nota)||json.nota<0||json.nota>100||!['vitoria','parcial','colapso'].includes(json.resultado))throw Error('Parecer da IA inválido');
-      gp5ParecerIA[g]={...json,rodadaId:String(appState.identificadorSorteioAtual||''),recebidoEm:new Date().toLocaleString('pt-BR')};
+      if(!r.ok)throw Error((json.erro||'Falha na avaliação')+(json.codigo?' (código '+json.codigo+')':''));
+      if(!Number.isInteger(json.nota)||json.nota<0||json.nota>100||!['vitoria','parcial','colapso'].includes(json.resultado))throw Error('Parecer inválido');
+      extrairNotasPorCriterioGP5(json);
+      var parecer={...json,rodadaId:String(appState.identificadorSorteioAtual||''),recebidoEm:new Date().toLocaleString('pt-BR')};
+      await registrarParecerGeminiGP5(i,parecer);
+      gp5ParecerIA[g]=parecer;
       renderAvaliacaoHibrida();
-      cyberAlert('Parecer do Gemini recebido. A banca deve registrar as seis notas e validar a operação.');
-    }catch(e){console.error('Gemini:',e);cyberAlert('Gemini: '+e.message+' — avaliação manual permanece disponível.');}
+      cyberAlert('Parecer recebido. Aguardando o registro da banca.');
+    }catch(e){console.error('Falha na avaliação:',e);cyberAlert('Avaliação: '+String(e.message||'Falha inesperada').replace(/Gemini/gi,'serviço de avaliação')+' — avaliação manual permanece disponível.');}
     finally{if(btn){btn.disabled=false;btn.textContent='Gerar parecer';}}
   }
   function renderAvaliacaoHibrida(){
@@ -2884,11 +2926,12 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
       if(!d){html+='<p class="subtitle">Aguardando resposta privada sincronizada.</p></section>';return;}
       html+='<div style="margin:12px 0;padding:13px;border:1px solid #35dfff;border-radius:10px;background:#0a1730"><strong style="color:#35dfff">RESPOSTA ENVIADA PELA EQUIPE</strong><p style="margin-top:9px"><b>Decisão imediata:</b> '+escaparHTML(d.q1Texto||'Não informada')+'</p><p style="margin-top:9px"><b>Decisão estrutural:</b> '+escaparHTML(d.q2Texto||'Não informada')+'</p>'+(d.pitchText?'<p style="margin-top:9px"><b>Explicação:</b> '+escaparHTML(d.pitchText)+'</p>':'')+'</div>';
       html+='<div class="btn-group"><button class="btn btn-sec" id="gp5-ia-btn-'+i+'" onclick="solicitarParecerIAGP5('+i+')">Gerar parecer</button></div>';
-      var parecerIA=gp5ParecerIA[g];
+      var parecerIA=gp5ParecerIA[g]||((a.parecerIA&&a.rodadaId===String(appState.identificadorSorteioAtual||''))?{...a.parecerIA,rodadaId:a.rodadaId}:null);
       if(parecerIA&&parecerIA.rodadaId===String(appState.identificadorSorteioAtual||'')){
         html+='<div style="margin:12px 0;padding:13px;border:1px solid #a477ff;border-radius:10px;background:#17102e"><strong style="color:#d5b4ff">PARECER CONSULTIVO</strong>'+
           '<p><b>Pontuação do parecer:</b> '+parecerIA.nota+'/100</p><p><b>Classificação do parecer:</b> '+escaparHTML(parecerIA.resultado)+'</p>'+
           '<p><b>Fundamentação:</b> '+escaparHTML(parecerIA.justificativa||'')+'</p><p><b>Alertas:</b> '+escaparHTML(parecerIA.alertas||'Nenhum informado')+'</p>'+
+          '<div style="margin-top:10px"><b>Notas por critério:</b>'+CRITERIOS_GP5.map(function(c){var n=(parecerIA.criterios||parecerIA.notasPorCriterio||parecerIA.notas||{})[c.id];return n?'<p style="margin-top:6px">'+escaparHTML(c.rotulo)+': <b>'+Number(n.nota) +'/'+c.max+'</b> — '+escaparHTML(n.justificativa||'')+'</p>':'';}).join('')+'</div>'+ 
           '</div>';
       }
       var editor=CRITERIOS_GP5.find(function(c){return c.id===gp5EditorId;});
@@ -2896,11 +2939,12 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
         var reg=(a.notas||{})[editor.id]||{};
         html+='<div class="form-group"><label>'+escaparHTML(editor.nome)+' — '+escaparHTML(editor.rotulo)+' (0–'+editor.max+')</label><input type="number" min="0" max="'+editor.max+'" step="1" id="gp5-nota-'+i+'-'+editor.id+'" oninput="gp5MarcarAlterado('+i+')" value="'+(reg.nota==null?'':Number(reg.nota))+'" style="max-width:110px"></div>';
       }else{}
-      if(gp5EditorId==='anna'||gp5EditorId==='carlos'){
-        html+='<h4>Conferência operacional</h4>';
+      if(gp5EditorId==='anna'||gp5EditorId==='carlos'||gp5EditorId==='marciele'){
+        html+='<h4>Conferência operacional — revise antes de publicar</h4>';
         VERIFICACOES_GP5.forEach(function(nome,j){html+='<div class="form-group"><label>'+escaparHTML(nome)+'</label><select id="gp5-check-'+i+'-'+j+'" onchange="gp5MarcarAlterado('+i+')"><option value="">Selecione...</option>'+[['sim','Atende'],['parcial','Atende parcialmente'],['nao','Não atende']].map(function(op){return '<option value="'+op[0]+'" '+((a.verificacoes||{})[j]===op[0]?'selected':'')+'>'+op[1]+'</option>';}).join('')+'</select></div>';});
         html+='<label><input type="checkbox" id="gp5-critico-'+i+'" onchange="gp5MarcarAlterado('+i+')" style="width:auto" '+(a.impedimentoCritico?'checked':'')+'> Impedimento crítico comprovado</label><details><summary style="cursor:pointer;color:var(--cyan)">Observação (opcional)</summary><textarea rows="2" id="gp5-parecer-'+i+'" oninput="gp5MarcarAlterado('+i+')" placeholder="Somente quando necessário">'+escaparHTML(a.parecer||'')+'</textarea></details>';
       }
+      html+='<div class="form-group" style="margin-top:12px"><label style="color:var(--text-main)"><input type="checkbox" id="gp5-marciele-validacao-'+i+'" style="width:auto"> Marciele conferiu as seis notas e o resultado operacional</label></div>';
       html+='<div class="btn-group">'+(editor?'<button class="btn btn-sec" onclick="salvarAvaliacaoUnicaGP5('+i+')">Salvar minha avaliação</button>':'')+'<button class="btn" onclick="publicarAvaliacaoGP5('+i+')">Marciele: validar e publicar</button></div>';
       var completas=feitas.length===CRITERIOS_GP5.length;
       html+='</section>';
@@ -2916,7 +2960,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     if(!campo||campo.value.trim()===''){cyberAlert('Preencha sua nota.');return;}
     var nota=Number(campo.value);
     if(!Number.isInteger(nota)||nota<0||nota>c.max){cyberAlert('Nota inválida para '+c.nome);return;}
-    var operacao=gp5EditorId==='anna'||gp5EditorId==='carlos',verificacoes={};
+    var operacao=gp5EditorId==='anna'||gp5EditorId==='carlos'||gp5EditorId==='marciele',verificacoes={};
     if(operacao)VERIFICACOES_GP5.forEach(function(_,j){var e=document.getElementById('gp5-check-'+i+'-'+j);if(e&&e.value)verificacoes[j]=e.value;});
     var critico=operacao?document.getElementById('gp5-critico-'+i).checked:false;
     var parecer=operacao?(document.getElementById('gp5-parecer-'+i)?.value||'').trim():'';
@@ -2971,13 +3015,14 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     if(cyberRole!=='mestre'||!sincronizacaoPronta)return;
     var g=appState.grupos[i],d=decisaoPrivadaGP5(g),a=avaliacaoGP5(g);
     if(!d){cyberAlert('Aguardando resposta original da equipe.');return;}
+    if(!document.getElementById('gp5-marciele-validacao-'+i)?.checked){cyberAlert('Marciele deve conferir as notas e o resultado operacional antes de publicar.');return;}
     if(!CRITERIOS_GP5.every(function(c){return (a.notas||{})[c.id]&&Number.isFinite(Number(a.notas[c.id].nota));})){cyberAlert('As seis notas são obrigatórias.');return;}
     var resultado=conclusaoGP5(a);
     if(resultado==='incompleta'){cyberAlert('Complete e salve a conferência operacional.');return;}
     if(!await cyberConfirm('Marciele confirma a publicação de '+g+'? Nota técnica e consequência operacional serão definitivas nesta rodada.'))return;
     var rodada=String(appState.identificadorSorteioAtual||'');
     var consultasDaRodada=((cyberPrivateState[String(i+1)]||{}).consultas||[]).length;
-    var parecerGerado=gp5ParecerIA[g]&&gp5ParecerIA[g].rodadaId===rodada?{nota:gp5ParecerIA[g].nota,resultado:gp5ParecerIA[g].resultado,justificativa:gp5ParecerIA[g].justificativa,alertas:gp5ParecerIA[g].alertas,recebidoEm:gp5ParecerIA[g].recebidoEm}:null;
+    var parecerGerado=(a.parecerIA&&a.rodadaId===rodada)?a.parecerIA:null;
     try{
       var r=await window.rtdbRunTransaction(window.rtdbRef(window.db,CYBER_BASE+'/publico'),function(st){
         if(!st||String(st.identificadorSorteioAtual||'')!==rodada||st.rodadaSalva||st.competicaoEncerrada)return;
