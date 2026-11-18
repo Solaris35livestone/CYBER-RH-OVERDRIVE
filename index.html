@@ -1150,7 +1150,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     if (a) a.checked = true; if (b) b.checked = true;
     var t = document.getElementById('decisao-justificativa-pitch'); if (t) t.value = d.t;
   }
-  // Avaliação automática: fundamentação 50, viabilidade 40, recursos 10.
+  // Análise técnica: fundamentação 50, viabilidade 40, recursos 10.
   function pontuacaoCalculada(p) {
     p = p || {};
     var automatico = limitar(p.fund,0,50) + limitar(p.viab,0,40) + limitar(p.saldo,0,10);
@@ -1772,11 +1772,13 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     var hist=appState.historicoRodadas||[];
     var vitorias=hist.reduce(function(n,h){var d=(h.decisoesRodada||h.decisoes||h.respostas||{})[g];return n+(d&&d.resultado==='vitoria'?1:0);},0);
     if(appState.competicaoEncerrada && !appState.rodadaSalva && appState.decisoes?.[g]?.resultado==='vitoria')vitorias++;
+    var participacoes=hist.reduce(function(n,h){var p=(h.placar||{})[g];return n+(p&&!p.naoRespondeu&&!!p.publicacaoId?1:0);},0);
+    if(appState.competicaoEncerrada&&!appState.rodadaSalva&&appState.pontuacoes?.[g]?.publicacaoId&&!appState.pontuacoes[g].naoRespondeu)participacoes++;
     var saldo=orcamentoAtual(g);
-    return {vitorias:vitorias,saldo:saldo};
+    return {vitorias:vitorias,saldo:saldo,participacoes:participacoes};
   }
   function compararClassificacao(a,b){
-    return b.total-a.total || b.saldo-a.saldo || b.vitorias-a.vitorias || a.grupo.localeCompare(b.grupo,'pt-BR');
+    return b.total-a.total || b.saldo-a.saldo || b.vitorias-a.vitorias || b.participacoes-a.participacoes;
   }
   function rankingFinalConcluido() {
     if ((appState.historicoRodadas || []).length !== 3 && !appState.competicaoEncerrada) return [];
@@ -1788,7 +1790,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     });
     lista.sort(compararClassificacao);
     var anterior=null,rank=0;
-    lista.forEach(function(item,i){var chave=[item.total,item.saldo,item.vitorias].join('|');if(chave!==anterior){rank=i+1;anterior=chave;}item.posicao=rank;});
+    lista.forEach(function(item,i){var chave=[item.total,item.saldo,item.vitorias,item.participacoes].join('|');if(chave!==anterior){rank=i+1;anterior=chave;}item.posicao=rank;});
     return lista;
   }
   function fecharPodioFinal(){var el=document.getElementById('podio-final-overlay');if(el)el.classList.remove('aberto');}
@@ -1884,40 +1886,62 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     mostrarPodioFinal();
   }
 
-  function salvarRodadaNoHistorico() {
+  async function salvarRodadaNoHistorico() {
+    if(cyberRole!=='mestre'||!sincronizacaoPronta){cyberAlert('Apenas o Mestre conectado pode encerrar a rodada.');return;}
     if(appState.competicaoEncerrada){cyberAlert('A competição já foi encerrada.');return;}
-    if (appState.rodadaSalva) { cyberAlert('Esta rodada já foi salva.'); return; }
-    if ((appState.historicoRodadas || []).length >= 3) { cyberAlert('Limite de três rodadas atingido.'); return; }
-    if (!appState.grupos.every(function(g) { return !!(appState.decisoes && appState.decisoes[g] && appState.pontuacoes && appState.pontuacoes[g] ); })) {
-      cyberAlert('Todas as equipes devem submeter as respostas antes de salvar a rodada.'); return;
-    }
-    // Conferir os registros privados originais, não apenas o placar publicado.
-    var rodadaId = String(appState.identificadorSorteioAtual || '');
-    var faltantes = (appState.grupos || []).filter(function(g, i) {
-      var d = cyberPrivateState[String(i + 1)];
-      return !d || String(d._rodadaId || '') !== rodadaId || !d.decisoes || !d.decisoes.q1Texto || !d.decisoes.q2Texto;
+    if(appState.rodadaSalva){cyberAlert('Esta rodada já foi salva.');return;}
+    if((appState.historicoRodadas||[]).length>=3){cyberAlert('Limite de três rodadas atingido.');return;}
+    var rodadaId=String(appState.identificadorSorteioAtual||'');
+    if(!rodadaId){cyberAlert('Nenhuma rodada ativa para encerrar.');return;}
+    var grupos=(appState.grupos||[]).slice();
+    var ausentes=grupos.filter(function(g,i){
+      var d=cyberPrivateState[String(i+1)];
+      return !d||String(d._rodadaId||'')!==rodadaId||!d.decisoes||!d.decisoes.q1Texto||!d.decisoes.q2Texto;
     });
-    if (faltantes.length) {
-      cyberAlert('Aguarde a sincronização das respostas originais antes de salvar. Pendentes: ' + faltantes.join(', '));
-      return;
-    }
-    if (!appState.historicoRodadas) appState.historicoRodadas = [];
-    var num = appState.historicoRodadas.length + 1;
-    var dados = { idRodada: String(appState.identificadorSorteioAtual||''), rodada: num, dataISO:new Date().toISOString(), hora: new Date().toLocaleTimeString(), placar: {}, cartasRodada: {}, decisoesRodada: {} };
-    appState.grupos.forEach(function(g) {
-      dados.placar[g] = Object.assign({}, appState.pontuacoes[g] || { total: 0 });
-      dados.cartasRodada[g] = appState.crises[g]?.titulo || 'N/A';
-      var indice = appState.grupos.indexOf(g) + 1;
-      dados.decisoesRodada[g] = JSON.parse(JSON.stringify(cyberPrivateState[String(indice)].decisoes));
-      dados.decisoesRodada[g].orcamentoFinal = (appState.orcamentosGrupos||{})[g];
+    var naoPublicadas=grupos.filter(function(g){
+      return !ausentes.includes(g)&&!(appState.pontuacoes||{})[g]?.publicacaoId;
     });
-    appState.historicoRodadas.push(dados);
-    appState.rodadaSalva = true;
-    guardarEstado();
-    renderHistoricoTendencias();
-    renderRanking();
-    avisoTemporario('Rodada ' + num + ' de 3 salva! ' + (num === 3 ? 'Partida concluída!' : 'Clique em Nova Rodada para continuar.'));
-    if (num === 3) setTimeout(mostrarPodioFinal, 650);
+    if(naoPublicadas.length){cyberAlert('Publique primeiro as avaliações das equipes que responderam: '+naoPublicadas.join(', '));return;}
+    if(ausentes.length){
+      var t=appState.cronometroCompeticao||{};
+      var esgotado=t.status==='encerrado'&&t.encerramentoMotivo==='tempo_esgotado'&&String(t.sorteioId||'')===rodadaId;
+      if(!esgotado){cyberAlert('Para encerrar com equipes sem resposta, aguarde o tempo acabar.');return;}
+      if(!await cyberConfirm('Tempo esgotado. Encerrar a rodada com nota acadêmica 0, penalidade de -10 pontos na classificação e orçamento inalterado para: '+ausentes.join(', ')+'? Esta ação bloqueará novos envios.'))return;
+    }else if(!await cyberConfirm('Salvar e encerrar a rodada atual?'))return;
+    try{
+      var dadosPrivados={};
+      grupos.forEach(function(g,i){var d=cyberPrivateState[String(i+1)];dadosPrivados[g]=d&&String(d._rodadaId||'')===rodadaId&&d.decisoes?JSON.parse(JSON.stringify(d.decisoes)):null;});
+      var r=await window.rtdbRunTransaction(window.rtdbRef(window.db,CYBER_BASE+'/publico'),function(st){
+        if(!st||st.rodadaSalva||st.competicaoEncerrada||String(st.identificadorSorteioAtual||'')!==rodadaId)return;
+        var hist=st.historicoRodadas||[];if(hist.length>=3)return;
+        var semResposta=grupos.filter(function(g){return ausentes.includes(g);});
+        if(semResposta.length){var t=st.cronometroCompeticao||{};if(t.status!=='encerrado'||t.encerramentoMotivo!=='tempo_esgotado'||String(t.sorteioId||'')!==rodadaId)return;}
+        for(var j=0;j<grupos.length;j++){
+          var g=grupos[j];
+          if(!semResposta.includes(g)&&!(st.pontuacoes||{})[g]?.publicacaoId)return;
+          if(semResposta.includes(g)&&((st.pontuacoes||{})[g]?.publicacaoId||(st.custosOperacionaisRodada||{})[g]?.rodadaId===rodadaId))return;
+        }
+        st.pontuacoes=st.pontuacoes||{};
+        st.decisoes=st.decisoes||{};
+        var num=hist.length+1;
+        var dados={idRodada:rodadaId,rodada:num,dataISO:new Date().toISOString(),hora:new Date().toLocaleTimeString(),placar:{},cartasRodada:{},decisoesRodada:{}};
+        grupos.forEach(function(g){
+          if(semResposta.includes(g)){
+            st.pontuacoes[g]={total:-10,notaAcademica:0,penalidadeAusencia:-10,resultadoOperacional:'nao_respondeu',naoRespondeu:true,publicacaoId:rodadaId+':ausente',custoOperacional:0,impactoOrcamento:0,orcamentoFinal:Number((st.orcamentosGrupos||{})[g]??100)};
+          }
+          dados.placar[g]=Object.assign({},st.pontuacoes[g]);
+          dados.cartasRodada[g]=(st.crises||{})[g]?.titulo||'N/A';
+          dados.decisoesRodada[g]=semResposta.includes(g)?{naoRespondeu:true,status:'Não respondeu',notaAcademica:0,penalidadeAusencia:-10}:Object.assign({},dadosPrivados[g]||{});
+          dados.decisoesRodada[g].orcamentoFinal=(st.orcamentosGrupos||{})[g]??100;
+        });
+        hist.push(dados);st.historicoRodadas=hist;st.rodadaSalva=true;
+        return st;
+      },{applyLocally:false});
+      if(!r.committed){cyberAlert('Não foi possível encerrar: os dados da rodada mudaram ou ainda há avaliações pendentes. Atualize a página e confira o placar.');return;}
+      var num=(r.snapshot.val().historicoRodadas||[]).length;
+      avisoTemporario('Rodada '+num+' de 3 encerrada! '+(ausentes.length?ausentes.length+' equipe(s) sem resposta receberam nota 0 e penalidade de -10 pontos no ranking, sem alteração de orçamento. ':'')+(num===3?'Partida concluída!':'Clique em Nova Rodada para continuar.'));
+      if(num===3)setTimeout(mostrarPodioFinal,650);
+    }catch(e){console.error('Falha ao encerrar rodada:',e);cyberAlert('Falha ao encerrar rodada: '+String(e?.message||e).slice(0,250));}
   }
 
   async function limparHistoricoRodadas() {
@@ -1952,7 +1976,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
   function exportarRelatorioHTML(){
     if(cyberRole!=='mestre')return;
     var linhas=dadosRelatorioCyber(),html='<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Relatório CYBER RH</title><style>body{font:15px Arial;max-width:1000px;margin:30px auto;color:#152036}article{padding:15px;border:1px solid #ccc;margin:12px 0;break-inside:avoid}h1{color:#174c83}p{white-space:pre-wrap}</style><h1>CYBER RH — Relatório final</h1>';
-    linhas.forEach(l=>{html+='<article><h2>Rodada '+Number(l.rodada)+' — '+escaparHTML(l.equipe)+'</h2><p><b>Carta:</b> '+escaparHTML(l.carta)+'</p><p><b>Decisão 1:</b> '+escaparHTML(l.decisao1)+'</p><p><b>Decisão 2:</b> '+escaparHTML(l.decisao2)+'</p><p><b>Justificativa:</b> '+escaparHTML(l.justificativa)+'</p><p><b>Resultado:</b> '+escaparHTML(l.resultado)+' | <b>Pontos:</b> '+escaparHTML(l.pontos)+' | <b>Orçamento:</b> '+escaparHTML(l.orcamento)+'</p><h3>Parecer automático integrado</h3>'+(l.parecerIA?'<p><b>Pontuação do parecer:</b> '+escaparHTML(l.parecerIA.nota)+'/100 | <b>Classificação do parecer:</b> '+escaparHTML(l.parecerIA.resultado||'')+'</p><p><b>Fundamentação:</b> '+escaparHTML(l.parecerIA.justificativa||'')+'</p><p><b>Alertas:</b> '+escaparHTML(l.parecerIA.alertas||'Nenhum')+'</p>':'<p>Não foi gerado parecer automático nesta rodada.</p>')+(l.parecerBanca?'<h3>Parecer da banca</h3><p>'+escaparHTML(l.parecerBanca)+'</p>':'')+'</article>';});
+    linhas.forEach(l=>{html+='<article><h2>Rodada '+Number(l.rodada)+' — '+escaparHTML(l.equipe)+'</h2><p><b>Carta:</b> '+escaparHTML(l.carta)+'</p><p><b>Decisão 1:</b> '+escaparHTML(l.decisao1)+'</p><p><b>Decisão 2:</b> '+escaparHTML(l.decisao2)+'</p><p><b>Justificativa:</b> '+escaparHTML(l.justificativa)+'</p><p><b>Resultado:</b> '+escaparHTML(l.resultado)+' | <b>Pontos:</b> '+escaparHTML(l.pontos)+' | <b>Orçamento:</b> '+escaparHTML(l.orcamento)+'</p><h3>Parecer técnico integrado</h3>'+(l.parecerIA?'<p><b>Pontuação do parecer:</b> '+escaparHTML(l.parecerIA.nota)+'/100 | <b>Classificação do parecer:</b> '+escaparHTML(l.parecerIA.resultado||'')+'</p><p><b>Fundamentação:</b> '+escaparHTML(l.parecerIA.justificativa||'')+'</p><p><b>Alertas:</b> '+escaparHTML(l.parecerIA.alertas||'Nenhum')+'</p>':'<p>Não foi emitido parecer técnico nesta rodada.</p>')+(l.parecerBanca?'<h3>Parecer da banca</h3><p>'+escaparHTML(l.parecerBanca)+'</p>':'')+'</article>';});
     baixarCyber('CYBER_RH_relatorio_impressao.html',html+'</html>','text/html;charset=utf-8');
   }
   function renderAvaliacaoFinalCyber(){
@@ -2900,7 +2924,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
       gp5ParecerIA[g]=parecer;
       renderAvaliacaoHibrida();
       cyberAlert('Parecer recebido. Aguardando o registro da banca.');
-    }catch(e){console.error('Falha na avaliação:',e);cyberAlert('Avaliação: '+String(e.message||'Falha inesperada').replace(/Gemini/gi,'serviço de avaliação')+' — avaliação manual permanece disponível.');}
+    }catch(e){console.error('Falha na avaliação:',e);cyberAlert('Parecer: '+String(e.message||'Falha inesperada').replace(/Gemini/gi,'serviço de avaliação')+' — o registro manual permanece disponível.');}
     finally{if(btn){btn.disabled=false;btn.textContent='Gerar parecer';}}
   }
   function renderAvaliacaoHibrida(){
@@ -3068,7 +3092,7 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
     var botaoPodio=document.getElementById('btn-rever-podio');
     if(botaoPodio)botaoPodio.style.display=(hist.length===3||appState.competicaoEncerrada)?'block':'none';
     tbody.innerHTML = lista.map(function(item, idx) {
-      return '<tr><td>' + (idx+1) + 'º</td><td>' + escaparHTML(item.grupo) + '</td><td>' + item.rodada + ' pts</td><td><strong style="color:var(--cyan);">' + item.total + ' / 300 pts</strong><div style="font-size:.7rem;color:var(--text-muted)">Saldo: '+item.saldo+' • Vitórias: '+item.vitorias+'</div></td></tr>';
+      return '<tr><td>' + (idx+1) + 'º</td><td>' + escaparHTML(item.grupo) + '</td><td>' + item.rodada + ' pts</td><td><strong style="color:var(--cyan);">' + item.total + ' / 300 pts</strong><div style="font-size:.7rem;color:var(--text-muted)">Saldo: '+item.saldo+' • Vitórias: '+item.vitorias+' • Participações: '+item.participacoes+'</div></td></tr>';
     }).join('');
   }
 
