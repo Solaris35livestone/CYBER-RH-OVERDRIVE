@@ -857,7 +857,7 @@ body { overflow-x:hidden; }
           <button class="btn" onclick="startMasterTimer()">Iniciar / Retomar</button>
           <button class="btn btn-sec" onclick="pauseMasterTimer()">Pausar</button>
           <button class="btn btn-sec" onclick="prorrogarTimer()">+2 min (todos)</button>
-          <button class="btn btn-danger" onclick="resetMasterTimer()">Encerrar etapa</button>
+          <button class="btn btn-danger" onclick="resetMasterTimer()">Encerrar tempo</button>
         </div>
       </div>
       <div class="card" style="margin-top:16px">
@@ -2783,19 +2783,60 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
   function publicarTimer(t) { appState.cronometroCompeticao=t; guardarEstado(); atualizarTimerCompartilhado(); }
   function setMasterTimerStage() { /* Etapa única: deliberação. */ }
   function updateTimerDisplay() { atualizarTimerCompartilhado(); }
-  function startMasterTimer() {
-    var t=Object.assign({},estadoTimer());
-    if (t.status==='rodando') return;
-    t.restante=tempoRestanteTimer(t) || (900);
-    t.terminaEm=Date.now()+t.restante*1000;t.status='rodando';publicarTimer(t);
+  async function startMasterTimer() {
+    if (cyberRole !== 'mestre' || !sincronizacaoPronta) {
+      cyberAlert('Somente o Mestre conectado pode controlar o tempo.');
+      return;
+    }
+    if (appState.rodadaSalva || appState.competicaoEncerrada) {
+      cyberAlert('A rodada já foi finalizada e não pode ser reaberta.');
+      return;
+    }
+    var rodadaId = String(appState.identificadorSorteioAtual || '');
+    if (!rodadaId) {
+      cyberAlert('Inicie o sorteio da rodada antes de controlar a deliberação.');
+      return;
+    }
+    var t = Object.assign({}, estadoTimer());
+    if (t.status === 'rodando' && tempoRestanteTimer(t) > 0) return;
+    if (t.sorteioId && String(t.sorteioId) !== rodadaId) {
+      cyberAlert('O cronômetro não pertence à rodada atual.');
+      return;
+    }
+    var reabrindo = t.status === 'encerrado' || (t.status === 'rodando' && tempoRestanteTimer(t) === 0);
+    if (reabrindo && !await cyberConfirm('Reabrir a deliberação por mais 15 minutos? As decisões já enviadas serão preservadas, e as equipes pendentes poderão responder.')) return;
+    // Uma pausa continua do tempo restante; um encerramento inicia novos 15 minutos.
+    var segundos = reabrindo ? 900 : (tempoRestanteTimer(t) || 900);
+    t.etapa = 'deliberacao';
+    t.sorteioId = rodadaId;
+    t.restante = segundos;
+    t.terminaEm = Date.now() + segundos * 1000;
+    t.status = 'rodando';
+    delete t.encerramentoMotivo;
+    delete t.encerradoEm;
+    publicarTimer(t);
+    if (reabrindo) avisoTemporario('Deliberação reaberta por 15 minutos. Respostas anteriores preservadas.');
   }
   function pauseMasterTimer() {
     var t=Object.assign({},estadoTimer());if(t.status!=='rodando')return;
     t.restante=tempoRestanteTimer(t);t.terminaEm=0;t.status='pausado';publicarTimer(t);
   }
   async function resetMasterTimer() {
-    if(!await cyberConfirm('Encerrar esta etapa do cronômetro?'))return;
-    var t=Object.assign({},estadoTimer());t.restante=0;t.terminaEm=0;t.status='encerrado';publicarTimer(t);
+    var atual=estadoTimer();
+    if(atual.status==='encerrado' || (atual.status==='rodando' && tempoRestanteTimer(atual)===0)) {
+      cyberAlert('O tempo de deliberação já está encerrado.');
+      return;
+    }
+    if(!await cyberConfirm('Encerrar agora o tempo de deliberação para todas as equipes? Os novos envios serão bloqueados, como no término natural do cronômetro.'))return;
+    var t=Object.assign({},estadoTimer(),{
+      restante:0,
+      terminaEm:0,
+      status:'encerrado',
+      encerramentoMotivo:'tempo_esgotado',
+      encerradoEm:Date.now()
+    });
+    publicarTimer(t);
+    avisoTemporario('Tempo de deliberação encerrado! Novos envios bloqueados.');
   }
   async function prorrogarTimer() {
     if(!await cyberConfirm('Acrescentar 2 minutos ao cronômetro compartilhado?'))return;
