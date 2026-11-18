@@ -3044,13 +3044,13 @@ function cyberPrompt(message){return cyberDialog(message,'prompt')}
         var total=CRITERIOS_GP5.reduce(function(s,c){return s+Number(av.notas[c.id].nota);},0);
         st.pontuacoes[g]={total:total,resultadoOperacional:res,publicacaoId:rodada+':'+String(i+1),
           implementada:implementada,reservaAcionada:reserva,custoOperacional:Number(registro.custo||0),
-          impactoOrcamento:efeito,orcamentoFinal:saldoFinal,custoConsultorias:consultasDaRodada*5,notas:av.notas,parecer:av.parecer,parecerIA:parecerGerado};
+          impactoOrcamento:efeito,orcamentoFinal:saldoFinal,custoConsultorias:consultasDaRodada*5,notas:av.notas,parecer:String(av.parecer||''),parecerIA:parecerGerado};
         av.publicado=true;av.resultadoFinal=res;av.publicadoEm=new Date().toISOString();
         return st;
       },{applyLocally:false});
       if(!r.committed){cyberAlert('Resultado já publicado ou dados da rodada alterados.');return;}
       cyberAlert('Resultado de '+g+' publicado com sucesso.');
-    }catch(e){console.error(e);cyberAlert('Falha na publicação. Confira conexão e permissões do Firebase.');}
+    }catch(e){console.error('Falha na publicação GP5:',e);var codigo=String(e&&e.code||'');var detalhe=String(e&&e.message||'Erro não identificado').slice(0,280);cyberAlert('Falha na publicação'+(codigo?' ['+codigo+']':'')+': '+detalhe);}
   }
 
   function renderRanking() {
